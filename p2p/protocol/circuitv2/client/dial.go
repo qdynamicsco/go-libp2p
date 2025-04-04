@@ -15,7 +15,7 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-const maxMessageSize = 4096
+const maxMessageSize = 1 << 14
 
 var DialTimeout = time.Minute
 var DialRelayTimeout = 5 * time.Second
