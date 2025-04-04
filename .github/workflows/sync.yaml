@@ -1,0 +1,149 @@
+name: Sync Upstream & Publish Patched Tags
+
+on:
+  workflow_dispatch: # Manual trigger
+  schedule:
+    - cron: '0 2 * * *' # Daily at 2 AM UTC
+
+permissions: write-all # Required for pushing tags
+
+jobs:
+  sync-and-publish: # Renamed job for clarity
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork's default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history is safer for tag operations
+
+      - name: Setup Git User
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+
+      - name: Copy patch file to temporary location
+        run: |
+          # Ensure the patch file exists before copying
+          if [ ! -f upstream.diff ]; then
+            echo "Error: upstream.diff not found in the default branch!"
+            exit 1
+          fi
+          echo "Copying patch file..."
+          cp upstream.diff /tmp/upstream.diff # Copy to /tmp
+
+      - name: Add Upstream Remote and Fetch Tags
+        run: |
+          git remote add upstream https://github.com/libp2p/go-libp2p.git
+          # Fetch upstream tags, potentially overwriting local refs if they conflict (unlikely for tags unless fetched before)
+          # Also fetch the upstream main/master to ensure tag base commits are present
+          git fetch upstream --tags --force
+          # Attempt to fetch default branch in case tags are based off recent commits not yet tagged
+          git fetch upstream $(git remote show upstream | grep 'HEAD branch' | cut -d' ' -f5) --depth 1 || echo "Could not fetch upstream default branch, continuing..."
+
+      - name: Sync fork tags with upstream (removing any fork-only tags)
+        run: |
+          set -eux
+
+          # Step 1: Get clean lists of tags from both remotes
+          echo "Fetching tags from remotes..."
+          upstream_tags=$(git ls-remote --tags --refs upstream | awk '{print $2}' | sed 's|refs/tags/||' | sort)
+          origin_tags=$(git ls-remote --tags --refs origin | awk '{print $2}' | sed 's|refs/tags/||' | sort)
+          
+          echo "Found $(echo "$origin_tags" | wc -l) tags in fork (origin)"
+          echo "Found $(echo "$upstream_tags" | wc -l) tags in upstream"
+          
+          # Step 2: Identify tags that exist ONLY in the fork (origin) but not in upstream
+          echo "Identifying fork-only tags for removal..."
+          tags_to_prune=""
+          for tag in $origin_tags; do
+            if ! echo "$upstream_tags" | grep -Fxq "$tag"; then
+              echo "🔍 Found fork-only tag: '$tag' (will be pruned)"
+              tags_to_prune="$tags_to_prune $tag"
+            fi
+          done
+          
+          # Step 3: Delete fork-only tags that aren't in upstream
+          if [ -n "$tags_to_prune" ]; then
+            echo "🗑️ Pruning $(echo "$tags_to_prune" | wc -w) tags from fork that don't exist in upstream..."
+            for tag in $tags_to_prune; do
+              echo "  - Deleting: $tag"
+              git push origin ":refs/tags/$tag" || echo "    (Failed to delete, continuing)"
+            done
+          else
+            echo "✅ No fork-only tags found to prune"
+          fi
+          
+          # Step 4: Update local git with clean data
+          git fetch upstream --tags
+          echo "Tag sync complete!"
+
+      - name: Process upstream tags, apply patch, and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e # Exit script on first error
+
+          # Get upstream tags (like vX.Y.Z). Filter out any potential 'patched-' tags just in case.
+          upstream_tags=$(git tag --list 'v*' --sort='v:refname' | grep -v "^patched-")
+
+          # Get tags already existing in *our* remote (origin)
+          # Use awk for safer parsing of tag names than grep alone
+          origin_tags=$(git ls-remote --tags origin | awk '{print $2}' | awk -F/ '{print $3}')
+
+          for tag in $upstream_tags; do
+            target_tag="$tag" # The tag name we want to create in our fork (same as upstream)
+            temp_branch="patching-$tag" # Temporary local branch name
+
+            # Check if the TARGET tag (e.g., v0.30.0) already exists in our fork (origin)
+            # Use exact match comparison
+            if echo "$origin_tags" | grep -Fxq "$target_tag"; then
+              echo "✅ Target tag $target_tag already exists remotely on origin. Skipping."
+              git checkout main # Ensure we are on main before next iteration
+              continue
+            fi
+
+            echo "🚀 Processing upstream tag: $tag"
+            # Checkout the original upstream tag into a temporary local branch
+            # Use -B to create or reset the branch
+            git checkout -B "$temp_branch" "refs/tags/$tag"
+
+            echo "Applying patch from /tmp/upstream.diff"
+            # Check if the patch applies cleanly
+            if ! git apply --check --ignore-whitespace /tmp/upstream.diff; then
+               echo "❌ Patch does not apply cleanly to $tag (even ignoring whitespace). Skipping."
+               git checkout main # Back to main before continuing
+               git branch -D "$temp_branch" # Clean up local temp branch
+               continue # Skip this tag
+            fi
+
+            # Apply the patch for real
+            git apply --ignore-whitespace /tmp/upstream.diff
+
+            # Check if the patch actually resulted in changes
+            if git diff --quiet HEAD; then
+               echo "⚠️ Patch applied but resulted in no changes for $tag. Skipping commit/tag/push."
+               git checkout main
+               git branch -D "$temp_branch" # Clean up local temp branch
+               continue
+            fi
+
+            rm -rf .github/
+
+            echo "Committing patch for $tag"
+            git add . # Stage all changes (including potential deletions like .github/)
+            # Create a commit. The message indicates it's based on the original tag + patch
+            git commit -m "Build: Apply custom patch on top of $tag" --allow-empty
+            git tag -f $target_tag
+
+            echo "Pushing target tag $target_tag to origin"
+            # Push the specific tag to origin.
+            # DO NOT USE --force unless you absolutely intend to overwrite existing tags.
+            # If the tag somehow got created between the check and now, this push will fail safely.
+            git push origin "refs/tags/$target_tag" --force
+
+            echo "Cleaning up local branch $temp_branch"
+            git checkout main # Switch back to main before deleting the temp branch
+            git branch -D "$temp_branch"
+          done
+          echo "✅ Tag processing complete."

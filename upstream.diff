@@ -1,0 +1,13 @@
+diff --git a/p2p/protocol/circuitv2/client/dial.go b/p2p/protocol/circuitv2/client/dial.go
+index 27165250..aaff40b4 100644
+--- a/p2p/protocol/circuitv2/client/dial.go
++++ b/p2p/protocol/circuitv2/client/dial.go
+@@ -15,7 +15,7 @@ import (
+ 	ma "github.com/multiformats/go-multiaddr"
+ )
+ 
+-const maxMessageSize = 4096
++const maxMessageSize = 1 << 14
+ 
+ var DialTimeout = time.Minute
+ var DialRelayTimeout = 5 * time.Second
