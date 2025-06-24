@@ -32,14 +32,19 @@ jobs:
           echo "Copying patch file..."
           cp upstream.diff /tmp/upstream.diff # Copy to /tmp
 
-      - name: Add Upstream Remote and Fetch Tags
+      - name: Add Upstream Remote and Fetch History
         run: |
+          set -eux
           git remote add upstream https://github.com/libp2p/go-libp2p.git
-          # Fetch upstream tags, potentially overwriting local refs if they conflict (unlikely for tags unless fetched before)
-          # Also fetch the upstream main/master to ensure tag base commits are present
+          echo "Determining upstream default branch..."
+          UPSTREAM_DEFAULT_BRANCH=$(git remote show upstream | grep 'HEAD branch' | cut -d' ' -f5)
+          echo "Fetching full history for branch '$UPSTREAM_DEFAULT_BRANCH' from upstream..."
+          # This is the critical change: fetch the entire branch history, not just tags or a shallow clone.
+          # This ensures all parent commits for any tag are present locally.
+          git fetch upstream $UPSTREAM_DEFAULT_BRANCH
+          echo "Fetching all tags from upstream..."
           git fetch upstream --tags --force
-          # Attempt to fetch default branch in case tags are based off recent commits not yet tagged
-          git fetch upstream $(git remote show upstream | grep 'HEAD branch' | cut -d' ' -f5) --depth 1 || echo "Could not fetch upstream default branch, continuing..."
+          echo "Upstream fetch complete."
 
       - name: Sync fork tags with upstream (removing any fork-only tags)
         run: |
