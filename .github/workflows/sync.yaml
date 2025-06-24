@@ -86,64 +86,51 @@ jobs:
 
           # Get upstream tags (like vX.Y.Z). Filter out any potential 'patched-' tags just in case.
           upstream_tags=$(git tag --list 'v*' --sort='v:refname' | grep -v "^patched-")
-
-          # Get tags already existing in *our* remote (origin)
-          # Use awk for safer parsing of tag names than grep alone
           origin_tags=$(git ls-remote --tags origin | awk '{print $2}' | awk -F/ '{print $3}')
 
           for tag in $upstream_tags; do
-            target_tag="$tag" # The tag name we want to create in our fork (same as upstream)
-            temp_branch="patching-$tag" # Temporary local branch name
+            target_tag="$tag"
+            temp_branch="patching-$tag"
 
-            # Check if the TARGET tag (e.g., v0.30.0) already exists in our fork (origin)
-            # Use exact match comparison
             if echo "$origin_tags" | grep -Fxq "$target_tag"; then
               echo "✅ Target tag $target_tag already exists remotely on origin. Skipping."
-              git checkout main # Ensure we are on main before next iteration
+              git checkout main
               continue
             fi
 
             echo "🚀 Processing upstream tag: $tag"
-            # Checkout the original upstream tag into a temporary local branch
-            # Use -B to create or reset the branch
             git checkout -B "$temp_branch" "refs/tags/$tag"
 
-            echo "Applying patch from /tmp/upstream.diff"
-            # Check if the patch applies cleanly
             if ! git apply --check --ignore-whitespace /tmp/upstream.diff; then
-               echo "❌ Patch does not apply cleanly to $tag (even ignoring whitespace). Skipping."
-               git checkout main # Back to main before continuing
-               git branch -D "$temp_branch" # Clean up local temp branch
-               continue # Skip this tag
+               echo "❌ Patch does not apply cleanly to $tag. Skipping."
+               git checkout main
+               git branch -D "$temp_branch"
+               continue
             fi
 
-            # Apply the patch for real
             git apply --ignore-whitespace /tmp/upstream.diff
 
-            # Check if the patch actually resulted in changes
             if git diff --quiet HEAD; then
-               echo "⚠️ Patch applied but resulted in no changes for $tag. Skipping commit/tag/push."
+               echo "⚠️ Patch applied but resulted in no changes for $tag. Skipping."
                git checkout main
-               git branch -D "$temp_branch" # Clean up local temp branch
+               git branch -D "$temp_branch"
                continue
             fi
 
             rm -rf .github/
-
-            echo "Committing patch for $tag"
-            git add . # Stage all changes (including potential deletions like .github/)
-            # Create a commit. The message indicates it's based on the original tag + patch
+            git add .
             git commit -m "Build: Apply custom patch on top of $tag" --allow-empty
             git tag -f $target_tag
 
+            echo "Pushing temporary branch $temp_branch to origin to upload commit objects"
+            git push origin "$temp_branch"
+
             echo "Pushing target tag $target_tag to origin"
-            # Push the specific tag to origin.
-            # DO NOT USE --force unless you absolutely intend to overwrite existing tags.
-            # If the tag somehow got created between the check and now, this push will fail safely.
             git push origin "refs/tags/$target_tag" --force
 
-            echo "Cleaning up local branch $temp_branch"
-            git checkout main # Switch back to main before deleting the temp branch
+            echo "Cleaning up remote and local branch $temp_branch"
+            git push origin --delete "$temp_branch"
+            git checkout main
             git branch -D "$temp_branch"
           done
           echo "✅ Tag processing complete."
